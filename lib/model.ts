@@ -237,10 +237,26 @@ function sizeTier(tvl: number): string {
   return '$100–$1,000';
 }
 
+/** A small deterministic hash of a slug, so wording variants are stable per protocol. */
+function slugHash(slug: string): number {
+  let h = 0;
+  for (let i = 0; i < slug.length; i++) h = (h * 31 + slug.charCodeAt(i)) >>> 0;
+  return h;
+}
+
+/** Pick one of `variants` for this slug, deterministically — the same protocol always reads the same. */
+function variant<T>(slug: string, variants: readonly T[]): T {
+  return variants[slugHash(slug) % variants.length]!;
+}
+
 /**
- * The farm plan: five concrete steps per protocol, written from its category playbook and its own
- * figures — where to start, what to deposit or trade, how often to return, what it costs and how
- * long it takes. Steps name costs and time because a plan without them is a slogan.
+ * The farm plan: seven concrete steps per protocol, written from its category playbook and its own
+ * figures. The first step verifies the premise — official channels only, and the protocol still
+ * records no token — and the last step sets the safety and exit rules; both rotate through several
+ * phrasings so no two protocols read as the same template. The two middle steps carry the category's
+ * real mechanics: a lending loop is not a bridge run is not a vault hold. Then one step written from
+ * the protocol's own record, the weekly rhythm, and the activity log. Steps name costs and time
+ * because a plan without them is a slogan.
  */
 export function farmSteps(p: SnapshotProtocol, onWatchlist: boolean, asOf: string): string[] {
   const home = cheapestChain(p.chains);
@@ -248,12 +264,16 @@ export function farmSteps(p: SnapshotProtocol, onWatchlist: boolean, asOf: strin
   const size = sizeTier(p.tvl_usd);
   const where = p.chains.length > 1 ? `${cost.note} — the cheapest of its ${p.chains.length} chains to farm on` : cost.note;
   const cat = p.category ?? 'DeFi';
-  const open = `Open ${p.name} on ${where} and connect a fresh wallet you use only for pre-token farming, so its activity is clean to attribute. Setup takes about 10 minutes and costs ${cost.gas}.`;
+
+  // Step 1 — verify the premise before any funds move. Four phrasings, one per protocol.
+  const verify = variant(p.slug, [
+    `Before any funds move, verify ${p.name} through its official channels only — the site linked from its DefiLlama page and its linked socials — and confirm it still records no token: no contract address, no claim page, no trading pair. The check takes about 10 minutes and is what keeps a fake claim site from taking the whole position.`,
+    `Start with verification, not a deposit: reach ${p.name} only via its official site and the socials it links to, and double-check that it records no token yet — if a "claim" page asks for a fee or a signature today, it is not ${p.name}. Budget about 10 minutes for this before connecting any wallet.`,
+    `Confirm the premise first: open ${p.name} from a source you trust, never a search ad or a DM link, and verify no token exists — no listed contract, no pair, no claim portal. This board ranks it precisely because it records no token; spend 10 minutes proving that is still true before acting.`,
+    `Do the counterfeit check first: find ${p.name}'s official site and socials independently, confirm the addresses match across both, and confirm it still records no token. Impostor claim sites are the main way pre-token farmers lose money, and the check takes about 10 minutes.`,
+  ]);
   const track = `Keep a dated log of every ${p.name} action — deposits, trades, votes — with transaction hashes; if a snapshot is ever announced, a 15-minute weekly log is what proves consistent use.`;
   const habit = `Return on a weekly rhythm for at least 8–12 weeks rather than one large visit: most points and airdrop criteria weight repeated weeks of activity over a single deposit. Budget about 20 minutes a week.`;
-  const close = onWatchlist
-    ? `Watch for a ${p.name} token announcement each week — it sits on the DefiLlama watchlist of large tokenless protocols, so set a calendar check; when claims open, act in the first days, not the last.`
-    : `Watch for a ${p.name} token announcement each week and re-check its TVL trend monthly; if TVL falls for three straight months, move the capital to a higher-ranked board row instead.`;
   // One step written from this protocol's own record: momentum, decline, longevity or reach.
   const age = ageDays(asOf, p.listed_at);
   let signal: string;
@@ -270,28 +290,108 @@ export function farmSteps(p: SnapshotProtocol, onWatchlist: boolean, asOf: strin
   }
   const byCategory: Record<string, string[]> = {
     Lending: [
-      `Supply ${size} of a major asset (ETH or a dollar stablecoin) as collateral on ${p.name}; supplying is one transaction at ${cost.gas} and starts earning the supply rate immediately.`,
-      `Borrow a small, safe amount against the collateral — keep the health factor above 2.0 — and repay within the same week: a completed borrow-and-repay cycle is the usage pattern lending launches usually reward, and it costs one extra round trip of gas.`,
+      `Supply ${size} of collateral on ${p.name} — a dollar stablecoin for a steady rate, or ETH if you also want the price exposure — on ${where}; one transaction at ${cost.gas}. Then borrow against it and re-supply the borrowed asset once: a single, deliberate loop, not leverage for its own sake.`,
+      `Work the position weekly for 8–12 weeks: keep the health factor above 2.0 — at that buffer the collateral can fall by roughly half before liquidation threatens — and track the net APY, the supply rate minus the borrow cost on the looped part. If the net runs negative for two straight weeks, unwind the loop; repay in full at least once mid-season and re-borrow, so the record shows completed borrow cycles. Each adjustment costs ${cost.gas}.`,
     ],
     Dexs: [
-      `Swap ${size} across the main pairs on ${p.name} in 4–6 separate trades over two weeks rather than one block: consistent volume with ${cost.gas} per swap reads as real use, not wash activity.`,
-      `Add a two-sided liquidity position of ${size} to a top-three pool by TVL and leave it at least a month; LP positions are the deepest usage signal a DEX records, and withdrawing early forfeits most of it.`,
-    ],
-    Yield: [
-      `Deposit ${size} into ${p.name}'s flagship vault and hold the position at least 8 weeks; vault share balance over time is the record a launch would most plausibly snapshot.`,
-      `Claim or compound the vault's yield every two weeks — each claim is one transaction at ${cost.gas} — so the wallet shows an unbroken history of active, returning use.`,
+      `Generate genuine volume on ${p.name}: swap ${size} in total across its main pairs in 6–10 separate trades over the first two weeks, on ${where} at ${cost.gas} per swap. Never wash trade — no round-trips or self-matched trades placed only to inflate volume; DEX launches screen for exactly that, and it can void a wallet's whole history. Every trade should move you between assets you actually want to hold.`,
+      `Split the flow between maker and taker: rest limit orders where ${p.name} supports them — maker fees typically run a fraction of taker fees — and take liquidity only for real rebalancing. Then add ${size} of two-sided liquidity to a top-three pool and leave it at least a month: LP depth held over time is the deepest usage signal a DEX records.`,
     ],
     Derivatives: [
-      `Open small perpetual positions totalling ${size} of margin on ${p.name}, a few trades a week for a month: steady volume across separate days is the metric derivatives launches track, at ${cost.gas} per order.`,
-      `Keep total leverage under 3x and close every position before funding payments compound; the goal is a long, ordinary trading history, not profit — cap the whole experiment's loss at 5% of the margin.`,
+      `Trade small perpetuals on ${p.name}: a few trades a week for at least a month, ${size} of margin in total, on ${where} at ${cost.gas} per order. Prefer maker orders where offered — maker fees run well below taker fees — and hedge directional trades with an offsetting spot position, so the flow is genuine hedging rather than volume for its own sake. Never wash trade: self-matched volume is screened out and can disqualify the wallet outright.`,
+      `Respect the funding rate: before holding a position overnight, check whether longs or shorts are paying funding on ${p.name} and avoid sitting on the paying side for days. Keep leverage under 3x, close positions before funding compounds, and cap the whole experiment's loss at 5% of the margin — over 8–12 weeks the prize is a long, ordinary trading history, not profit.`,
     ],
-    Perps: [
-      `Open small perpetual positions totalling ${size} of margin on ${p.name}, a few trades a week for a month: steady volume across separate days is the metric derivatives launches track, at ${cost.gas} per order.`,
-      `Keep total leverage under 3x and close every position before funding payments compound; the goal is a long, ordinary trading history, not profit — cap the whole experiment's loss at 5% of the margin.`,
+    Yield: [
+      `Deposit ${size} into ${p.name}'s flagship vault on ${where} — one transaction at ${cost.gas}. Before depositing, name the vault's yield source in your log: lending interest, trading fees, or emissions. Yield paid from real revenue can survive to a launch; yield promised from a token that does not exist yet is a hope, and should be sized like one.`,
+      `Track the share token, not the balance: record the vault shares received and the share price weekly for 8–12 weeks — share-price growth is the vault's true return, since the share count never changes. Mid-season, test the exit with a small withdrawal and time it: withdrawal queues and cooldowns lengthen exactly when everyone leaves, and knowing yours in advance is part of the position.`,
+    ],
+    'Yield Aggregator': [
+      `Deposit ${size} into ${p.name}'s main auto-compounding vault on ${where} at ${cost.gas}. An aggregator routes deposits across underlying farms, so read which strategies the vault currently runs and where its APY is sourced before the deposit — you are farming the aggregator's choices as much as your own.`,
+      `Let it compound untouched for at least 8 weeks: the unbroken, compounding balance is the record a launch would snapshot. Check monthly that the vault has not rotated into a strategy you would not pick yourself, and make one small test withdrawal mid-season to learn its exit timing and fees while nothing is urgent.`,
+    ],
+    'Risk Curators': [
+      `Deposit ${size} into a ${p.name}-curated vault on ${where} — one transaction at ${cost.gas}. Curators allocate other people's money across lending markets, so choose the vault by its stated risk framework — which collateral it accepts, its loan-to-value caps — rather than by the highest APY on the page.`,
+      `Monitor the curation, not just the yield: a curator can reallocate between markets and loosen or tighten risk parameters at any time, so re-read the vault's allocations monthly across the 8–12 week season. If it moves into collateral you would not hold directly, withdraw — the curator's track record is only worth farming while its risk stays inside yours.`,
+    ],
+    'Onchain Capital Allocator': [
+      `Allocate ${size} through ${p.name}'s main vault or strategy on ${where} at ${cost.gas}. Allocators route capital across on-chain opportunities under a stated mandate, so read the current allocation breakdown first: which protocols hold the money, in what proportions, and what the strategy may change without asking.`,
+      `Hold the allocation for a full 8–12 week season and follow the rebalances: log each time ${p.name} shifts capital between strategies, and claim or compound distributions on the protocol's own schedule. A season of continuously held, rebalanced allocation is exactly the history an allocator's launch can measure.`,
+    ],
+    'Basis Trading': [
+      `Run a small delta-neutral basis position through ${p.name} with ${size}: pair a spot holding against an offsetting short (or the reverse) to harvest funding and spread, on ${where} at ${cost.gas} per leg. Confirm both legs are live before sizing up — an unpaired leg is a directional bet wearing a basis trade's clothes.`,
+      `Check the carry weekly for 8–12 weeks: funding flips sign, so log the net carry after all fees each week and close the position if it stays negative for two straight weeks. Keep margin buffers wide on both legs — a basis trade's real risk is one leg liquidating in a fast move, not the spread closing.`,
     ],
     CDP: [
-      `Open a collateralised position on ${p.name}: deposit ${size} of ETH or a liquid staking token and mint the stablecoin at a conservative 200%+ collateral ratio, one transaction at ${cost.gas}.`,
-      `Hold the minted position open for at least 8 weeks and service it monthly — top up or repay a little each month — so the wallet's record shows a maintained vault, not a drive-by mint.`,
+      `Open a collateralised position on ${p.name}: deposit ${size} of ETH or a liquid staking token on ${where} and mint its stablecoin at a collateral ratio of 200% or higher — one transaction at ${cost.gas}. The wide buffer is deliberate: at 200%, the collateral can fall by half before liquidation threatens the position.`,
+      `Hold the minted position open at least 8 weeks and service it monthly — top up collateral after sharp drops, or repay a little — while watching the stability fee, which accrues against the debt continuously. The position's net cost is that fee minus whatever the minted stablecoin earns where you park it; a maintained vault, not a drive-by mint, is the record that counts.`,
+    ],
+    Bridge: [
+      `Move real funds through ${p.name}: bridge ${size} to a chain you genuinely use, carrying your own working balances on trips you would make anyway, at its stated fee plus ${cost.gas} per transfer. Never bridge funds back and forth just to manufacture volume — bridge analytics flag round-trip patterns, and flagged flow is worth less than none.`,
+      `Diversify the routes over 8–12 weeks: use at least three different source-and-destination pairs ${p.name} supports, and cap the all-in cost of each transfer at roughly 0.5% of the amount moved — if a route quotes more, wait for a cheaper window. Route diversity with a real purpose behind it is the history a bridge launch can reward.`,
+    ],
+    'Liquid Staking': [
+      `Stake ${size} of the chain's native asset through ${p.name} on ${where} at ${cost.gas}, and hold the liquid staking token you receive. Note the exchange rate at deposit in your log: the rate, not the token count, carries the staking yield, and an unbroken hold is what a duration-weighted record rewards.`,
+      `Hold the staking token for at least 8–12 weeks; put a portion to work as collateral or in a liquidity pool if you want the composability these tokens exist for. Before adding size, run one small unstake and time it end to end — staking exit queues run from days to weeks, and that wait is part of the position's real cost.`,
+    ],
+    Restaking: [
+      `Restake ${size} of an already-staked asset through ${p.name} on ${where} at ${cost.gas}: you keep the base staking yield and add the restaking layer's record on top. First read exactly which services the restaked capital secures — that list, and its slashing conditions, is the extra risk being accepted.`,
+      `Hold the restaked position for a full season of at least 8–12 weeks, tracking base staking yield and restaking incentives as separate lines in your log. Test a small exit mid-season and time it: restaking withdrawal queues can run a week or more, and an exit you have rehearsed is worth more than a yield point.`,
+    ],
+    Chain: [
+      `Be an early citizen of the ${p.name} chain rather than a passer-by: bridge ${size} in through its official route and keep it on-chain for the season. A pre-token chain can only reward wallets that were genuinely there, and bridged-and-used beats bridged-and-idle; the bridge-in costs the bridge's fee plus ${cost.gas}.`,
+      `Use the chain weekly for 8–12 weeks — ordinary transfers, its first-party apps, a small permanent balance left on-chain. If a validator or staking programme exists, stake a portion: on a chain with no token yet, transacting and staking are the two histories a genesis allocation can actually measure.`,
+    ],
+    'Staking Pool': [
+      `Stake ${size} through ${p.name}'s pool on ${where} at ${cost.gas} and hold the staking receipt: pooled staking is the whole product, so the record that matters is stake duration and continuity, not trading activity around it.`,
+      `Leave the stake untouched for at least 8–12 weeks, compounding rewards back in monthly where the pool allows it. Learn the unbonding period before you need it — pooled stakes can take days to weeks to release, and that queue is a real cost of the position, not a detail.`,
+    ],
+    'Liquidity Manager': [
+      `Deposit ${size} into ${p.name}'s managed liquidity position on ${where} at ${cost.gas}. The manager sets and rebalances the price range for you, so read its stated range strategy and recent fee history first: you are farming the manager's competence as much as the pool's volume.`,
+      `Hold at least 8 weeks while the manager works: log each rebalance and the fees earned net of impermanent loss. If the position sits out of range for two straight weeks with no rebalance, withdraw — a managed position nobody manages earns nothing and still carries the pool's risk.`,
+    ],
+    CeDeFi: [
+      `Onboard with ${p.name} before depositing anything: account setup, identity checks and terms can take several days, and CeDeFi yields are generated through centralised or off-chain venues — read how returns are produced and what custody you are accepting, then place ${size} in its main product at ${cost.gas} per action.`,
+      `Keep the position for one full product term (typically 4–12 weeks) and withdraw once at maturity to prove the exit works end to end. Size this as the riskiest slice of the whole farm: the counterparty is the protocol itself, and no on-chain record diversifies that away.`,
+    ],
+    'Anchor BTC': [
+      `Bring ${size} of bitcoin exposure to ${p.name} through its stated route on ${where}: BTC-anchored products take deposits of BTC or a BTC derivative, so confirm exactly which asset it accepts and what receipt asset you get back — the receipt is your real position. Any wrap or bridge fee sits on top of ${cost.gas}.`,
+      `Hold for at least 8–12 weeks and check the backing monthly wherever ${p.name} publishes reserves or mint-and-burn records. BTC products live or die on redemption: test a small withdrawal mid-season and time it, because an exit that takes days changes what the position is actually worth.`,
+    ],
+    'Leveraged Farming': [
+      `Open a modest leveraged farm on ${p.name} with ${size} of equity on ${where}: borrow against the deposit to farm a larger position, but keep leverage at or under 2x — the liquidation threshold, not the headline APY, decides whether the position survives an 8–12 week season. Opening or adjusting costs ${cost.gas} each.`,
+      `Check the position's health weekly and after any 10% market move. Leveraged farming accrues borrow cost continuously, so compute the net APY — farm yield minus borrow rate — monthly and deleverage if it turns negative; a completed season that was never liquidated is the record worth having.`,
+    ],
+    'Dual-Token Stablecoin': [
+      `Take the stability side of ${p.name}'s system with ${size} on ${where} at ${cost.gas}: mint or acquire its stablecoin through the protocol's own route and hold or deposit it where the system directs. In a dual-token design the second token absorbs volatility — understand which side of that bargain you are on before depositing.`,
+      `Watch the peg weekly for 8–12 weeks and set the exit rule now: leave if the coin trades 2% or more off its peg for over 48 hours. Track what backs the coin and how losses are socialised; a stablecoin farm's yield is small and steady, and its risk is neither — size accordingly.`,
+    ],
+    'Stablecoin Wrapper': [
+      `Wrap ${size} of a yield-bearing stablecoin through ${p.name} on ${where} at ${cost.gas}, and record the exchange rate you receive: wrapper shares appreciate as the underlying yield accrues, so the share price — not the share count — is where your return will show up.`,
+      `Hold the wrapped position at least 8–12 weeks, checking monthly that the wrapper's share price tracks the underlying asset's yield as it should. Test a small unwrap mid-season: redemption timing and any exit fee are a wrapper's real costs, and they only become visible at the exit.`,
+    ],
+    'Collateral Markets': [
+      `Supply ${size} of collateral through ${p.name} on ${where} at ${cost.gas}. Collateral markets let networks draw shared security from deposited assets, so read which networks your collateral would secure and exactly what slashing conditions apply before the deposit — that underwriting is the product.`,
+      `Hold the collateral for a full 8–12 week season and re-check the network list monthly: every network added changes the risk your deposit underwrites. Keep the position in an asset you would hold anyway; the yield here is compensation for slashing risk, not a free return.`,
+    ],
+    'Governance Incentives': [
+      `Work ${p.name}'s incentive programme by its own rulebook: read which actions earn, over what epochs, and what rewards are paid in, then complete the qualifying actions exactly as specified with ${size} on ${where} — enrolment actions cost ${cost.gas} each. Programmes reward rule-exact participation, not approximations of it.`,
+      `Complete every epoch rather than dipping into one: incentive programmes snapshot participation per epoch, so a full run of epochs across 8–12 weeks outweighs one large week. Claim each epoch's reward as it lands — unclaimed epoch rewards are the most common way these farms quietly pay zero.`,
+    ],
+    'Crypto Card Issuer': [
+      `Activate ${p.name}'s card and load it with ${size} for spending you would do anyway. A card issuer's launch record is genuine payment volume, so route ordinary weekly purchases through the card rather than manufacturing spend that teaches the issuer nothing about you as a customer.`,
+      `Keep the card active at least 8–12 weeks with regular small transactions and a balance held in the linked account between spends. If a cashback or rewards tier exists, reach it through normal spending only — returned purchases and self-payments are precisely the patterns card issuers exclude from rewards.`,
+    ],
+    'Uncollateralized Lending': [
+      `Lend ${size} through ${p.name} on ${where} at ${cost.gas}. Uncollateralised lending means borrowers are vetted by underwriting or reputation rather than by locked collateral, so read who borrows, what stands behind them, and what happens on default before choosing a pool — the borrower's quality is the product.`,
+      `Spread the position across at least two pools or borrowers if ${p.name} allows it, and hold each loan to its stated term, typically 30–90 days. Default risk is this product's real price: a single default can erase a year of interest, so size the position as if one loan in five might fail.`,
+    ],
+    'Prediction Market': [
+      `Trade ${size} across ${p.name}'s markets on ${where} at ${cost.gas} per trade, taking positions on events you genuinely have a view on. Prediction markets record resolved, honestly-held positions; a history of settled trades across several markets is the usage a launch can count.`,
+      `Let positions settle rather than always selling out early — settlement is the on-chain event that completes the record. Spread activity across at least 8 weeks and several unrelated markets; one day of concentrated volume on a single market reads as farming, not forecasting.`,
+    ],
+    'Interest Rate Derivatives': [
+      `Take a small interest-rate position on ${p.name} with ${size} on ${where} at ${cost.gas}: fix or float a rate against an underlying lending market you already understand, and note the maturity date in your log — rate positions expire, so the record here is a series of completed terms, not one open position.`,
+      `Roll at each maturity for at least two full terms (typically 4–12 weeks each), holding a consistent view. Keep total margin and premiums under 2% of your farming budget: in rate markets, longevity of participation is what distinguishes a user from a tourist.`,
     ],
     Launchpad: [
       `Register on ${p.name} and complete one small participation of ${size} in a live sale, following its stated allocation rules exactly; a completed, rule-abiding entry is the record that matters if access later becomes token-gated.`,
@@ -342,12 +442,34 @@ export function farmSteps(p: SnapshotProtocol, onWatchlist: boolean, asOf: strin
       `Harvest or compound weekly — one transaction at ${cost.gas} — for at least 8 weeks, so the wallet accumulates the repeated-action history farm launches snapshot.`,
     ],
   };
+  // Aliases: playbooks shared by the category strings the snapshot actually uses for the same mechanics.
+  byCategory['Perps'] = byCategory['Derivatives']!;
+  byCategory['CDP Manager'] = byCategory['CDP']!;
+  byCategory['Canonical Bridge'] = byCategory['Bridge']!;
+  byCategory['Cross Chain Bridge'] = byCategory['Bridge']!;
+  byCategory['Liquid Restaking'] = byCategory['Restaking']!;
+  byCategory['Decentralized BTC'] = byCategory['Anchor BTC']!;
+  byCategory['Algo-Stables'] = byCategory['Dual-Token Stablecoin']!;
+  byCategory['Stablecoin Issuer'] = byCategory['Dual-Token Stablecoin']!;
+  byCategory['Options Vault'] = byCategory['Options']!;
   const middle = byCategory[cat] ?? [
-    `Put ${size} to work in ${p.name}'s main product — its highest-TVL pool, vault or market — and leave it in place at least 8 weeks; a held position is the record a launch snapshots.`,
-    `Make one small additional action every two weeks (a deposit top-up, a claim, or a rebalance) at ${cost.gas} each, so the wallet reads as an active user across the whole season.`,
+    `Put ${size} to work in ${p.name}'s main ${cat.toLowerCase()} product — its highest-TVL offering — on ${where}, and leave it in place at least 8 weeks; a held position is the record a launch snapshots, and each action costs ${cost.gas}.`,
+    `Make one small additional action every two weeks (a deposit top-up, a claim, or a rebalance) at ${cost.gas} each, so the wallet reads as an active ${cat.toLowerCase()} user across the whole season rather than a single visit.`,
   ];
-  return [open, middle[0]!, middle[1]!, signal, habit, track, close];
+
+  // Step 7 — the safety and exit rules, in four phrasings; the tail differs for watchlist rows.
+  const tail = onWatchlist
+    ? `It sits on the DefiLlama watchlist of large tokenless protocols, so check for a token announcement weekly — and if one lands, claim only through the official channels verified in step one, inside the first week.`
+    : `If its TVL falls for three straight months, move the capital to a higher-ranked board row instead; if a token is announced, claim only through the official channels verified in step one.`;
+  const exit = variant(p.slug, [
+    `Set the exit rules now, while nothing is at stake: cap the total at risk in ${p.name} at the ${size} band, review the position monthly, and withdraw in full if the protocol is exploited, goes silent for a full quarter, or its TVL halves from here. ${tail}`,
+    `Write the exit down before you need it: leave ${p.name} if its TVL halves, if an exploit or a damning audit surfaces, or if a claim ever demands approvals beyond the claim itself. Never chase a falling position with fresh capital. ${tail}`,
+    `Keep the position survivable: never let ${p.name} hold more than you could lose entirely, keep the farming wallet's seed phrase offline, and re-verify the official channels before every withdrawal — phishing peaks exactly when a launch is announced. ${tail}`,
+    `Plan the whole arc, not just the entry: farm ${p.name} for one season of 8–12 weeks, then reassess against the board — deepen, hold, or rotate out. An exit rehearsed in advance (a small test withdrawal mid-season) is an exit that works under pressure. ${tail}`,
+  ]);
+  return [verify, middle[0]!, middle[1]!, signal, habit, track, exit];
 }
+
 
 /** One row of board.json: the ranked board's row. */
 export interface BoardRow {
