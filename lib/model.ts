@@ -1,30 +1,38 @@
-// Token Launch Radar — the model (radar-ember-2).
+// Token Launch Radar — the model (radar-ember-3).
 //
 // One sealed DefiLlama snapshot in, one ranked board of pre-token protocols out.
 //
 // The board covers every slug on the snapshot's watchlist (the floor, never the ceiling) and adds
-// early candidates below the floor that pass the same product screen the house applied to the
+// every other pre-token protocol that passes the same product screen the house applied to the
 // watchlist: a candidate records no token and is not an exchange, a bridge, a liquid (re)staking
 // product, a versioned pool of another protocol, or a name carrying wrapped/staked/staking.
+// Earlier editions of this board also set aside screen-passing protocols above the $50M floor
+// that the watchlist did not name; this edition carries them — they record no token and pass the
+// stated screen, so the board says so rather than silently dropping the largest finds.
 //
-// Implied value is category-anchored. The snapshot's own live protocols — the ones whose tokens
-// already trade — state what the market pays per dollar of TVL in each category:
+// Implied value is FITTED, not hand-set. The snapshot's own traded protocols — the ones whose
+// tokens already trade at a real (positive) market cap — are the training set, once the same
+// product screen is applied to them. On those rows a ridge regression learns
 //
-//   peerMultiple(category) = the category's median(mcap_usd / tvl_usd over its live protocols),
-//                            shrunk toward the global median by a prior of 3 peers —
-//                            (n x category median + 3 x global median) / (n + 3) — so a thin
-//                            category cannot swing a ranking on two or three prints; clamped
-//                            to [0.05, 3.0]. The global median stands in when a category has
-//                            fewer than 3 live peers with a market cap.
-//   base      = tvl_usd x peerMultiple(category)
-//   growth    = 1 + clamp(change_7d, -40, 80) / 100 x 0.30      (unreported growth counts as 0)
-//   maturity  = 0.75 + 0.25 x min(age_days, 1460) / 1460        (unknown listing day counts 365)
-//   reach     = 1 + 0.02 x min(chains - 1, 5)                    (distribution breadth, at most +10%)
-//   implied   = max(1, round(base x growth x maturity x reach))
+//   log10(market cap) = intercept
+//                     + b1 x z(log10 TVL)
+//                     + b2 x z(asinh(7-day growth / 20))
+//                     + b3 x z(log1p(age in years))
+//                     + b4 x z(log2(chain count))
+//                     + a shrunk effect per category,
 //
-// Every figure comes from the snapshot itself: TVL, seven-day growth, the day DefiLlama began
-// tracking the protocol, its chains, and its category's live peers. No protocol name is ever
-// special-cased; one function scores every row, and the dashboard shows each row's arithmetic.
+// with continuous features standardised (z) on the training rows and one ridge penalty, picked
+// by five-fold cross-validation from a fixed grid, on every coefficient but the intercept.
+// A pre-token row's implied value is 10 raised to its fitted log10 market cap, and its P10–P90
+// band is that estimate shifted by the 10th and 90th percentiles of the out-of-fold residuals:
+// the range the fitted model actually missed by, on protocols whose true caps are known.
+//
+// The cross-validation also scores the previous edition's model (radar-ember-2: TVL x a
+// category's median live multiple, shrunk toward the global median, x hand-set growth, maturity
+// and reach factors) on the same folds, so the dashboard can state honestly what the fit buys:
+// a far smaller typical error, at a rank correlation that is a wash within the noise of 88 rows.
+// Every figure comes from the snapshot itself. No protocol name is ever special-cased; one
+// function scores every row, and the dashboard shows each row's own fitted arithmetic.
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
@@ -50,15 +58,15 @@ export interface Snapshot {
 }
 
 /** The model's version label: the dashboard names it and the board carries it. */
-export const MODEL_VERSION = 'radar-ember-2';
+export const MODEL_VERSION = 'radar-ember-3';
 
-/** Total ranked rows: the whole watchlist plus the strongest early candidates under the floor. */
+/** Total ranked rows: the whole watchlist plus the strongest screened candidates beyond it. */
 export const BOARD_ROWS = 240;
 
 /** How many live-token protocols the dashboard's Live view carries, by market cap. */
 export const LIVE_ROWS = 24;
 
-/** Peer-multiple clamps and adjustment weights, stated on the dashboard. */
+/** The v2 baseline's constants, kept because the fit report scores that model on the same folds. */
 export const MODEL = {
   multiple_floor: 0.05,
   multiple_cap: 3.0,
@@ -105,6 +113,18 @@ function median(values: number[]): number {
   const mid = Math.floor(sorted.length / 2);
   return sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
 }
+
+/** A small deterministic hash of a slug: fold assignment and stable wording variants. */
+function slugHash(slug: string): number {
+  let h = 0;
+  for (let i = 0; i < slug.length; i++) h = (h * 31 + slug.charCodeAt(i)) >>> 0;
+  return h;
+}
+
+// ------------------------------------------------------------------ the v2 baseline model
+//
+// radar-ember-2, kept intact: the fit report scores it out-of-fold on the same folds and the
+// dashboard shows its peer-multiple table as the baseline's evidence.
 
 /** One category's live-peer evidence, as the dashboard's methodology panel states it. */
 export interface PeerStat {
@@ -163,22 +183,31 @@ export function isPreToken(p: SnapshotProtocol): boolean {
 }
 
 const VERSIONED = /\s(V\d+(\.\d+)?|v\d+(\.\d+)?|\d+\.\d+)$/;
-const PRODUCT_CATEGORIES = new Set(['Bridge', 'Canonical Bridge', 'Liquid Staking', 'Liquid Restaking', 'Restaked BTC', 'CEX']);
+const PRODUCT_CATEGORIES = new Set(['Bridge', 'Canonical Bridge', 'Cross Chain Bridge', 'Liquid Staking', 'Liquid Restaking', 'Restaked BTC', 'CEX']);
 const PRODUCT_WORD = /\b(wrapped|staked|staking)\b/i;
-const EXCHANGE_PREFIX = /^(Binance|Coinbase|Bybit|Kraken|Bitget|OKX|Bitfinex|Gemini)\b/;
+const EXCHANGE_PREFIX = /^(Binance|Coinbase|Bybit|Kraken|Bitfinex|Gemini)\b/;
 
 /**
- * The early-candidate screen, mirroring the house's watchlist rule below the floor: pre-token,
- * not a wrapped, staked or bridged product of a traded token, not an exchange, not a versioned pool.
+ * The product screen, shared by the board and the fit's training set: not a wrapped, staked or
+ * bridged product of a traded token, not an exchange, not a versioned pool of another protocol.
+ * Cross Chain Bridge stands with the other bridge categories — a bridge by name and by product.
  */
-export function isEarlyCandidate(p: SnapshotProtocol): boolean {
-  if (!isPreToken(p)) return false;
+export function passesProductScreen(p: SnapshotProtocol): boolean {
   if (p.category !== null && PRODUCT_CATEGORIES.has(p.category)) return false;
   if (VERSIONED.test(p.name) || PRODUCT_WORD.test(p.name) || EXCHANGE_PREFIX.test(p.name)) return false;
   return true;
 }
 
-/** The four multipliers and the implied value one protocol gets under this model. */
+/**
+ * The early-candidate screen, mirroring the house's watchlist rule: pre-token and through the
+ * product screen. The screen no longer sets a protocol aside for sitting above the floor.
+ */
+export function isEarlyCandidate(p: SnapshotProtocol): boolean {
+  if (!isPreToken(p)) return false;
+  return passesProductScreen(p);
+}
+
+/** The four multipliers and the implied value one protocol gets under the v2 baseline. */
 export function impliedValue(
   p: SnapshotProtocol,
   asOf: string,
@@ -194,6 +223,333 @@ export function impliedValue(
   const implied = Math.max(1, Math.round(base * growthMult * maturityMult * reachMult));
   return { implied, base, growthMult, maturityMult, reachMult, age };
 }
+
+// ------------------------------------------------------------------ the fitted model (v3)
+
+/** The ridge penalties the cross-validation picks from, weakest to strongest. */
+export const LAMBDA_GRID = [0.1, 0.3, 1, 3, 10, 30, 100, 300];
+
+/** Cross-validation folds; a protocol's fold is slugHash(slug) % FIT_FOLDS — no randomness. */
+export const FIT_FOLDS = 5;
+
+/**
+ * The fit's training set: the snapshot's traded protocols with a real market cap — the field is
+ * present and positive (a 0 or -1 in it is a placeholder, not a price) — TVL above zero, through
+ * the same product screen the board applies.
+ */
+export function trainingSet(snapshot: Snapshot): SnapshotProtocol[] {
+  return snapshot.protocols.filter(
+    (p) => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0 && passesProductScreen(p),
+  );
+}
+
+/** The four continuous features, before standardisation, exactly as the methodology states them. */
+function rawFeatures(p: SnapshotProtocol, asOf: string): [number, number, number, number] {
+  const growthPct = Math.min(400, Math.max(-90, finite(p.change_7d, 0)));
+  const age = ageDays(asOf, p.listed_at);
+  const years = (age ?? MODEL.unknown_age_days) / 365.25;
+  return [
+    Math.log10(Math.max(p.tvl_usd, 1)),
+    Math.asinh(growthPct / 20),
+    Math.log1p(years),
+    Math.log2(Math.max(1, p.chains.length)),
+  ];
+}
+
+/** Training means and population standard deviations of the four continuous features. */
+function featureStats(rows: SnapshotProtocol[], asOf: string): { mu: number[]; sd: number[] } {
+  const raws = rows.map((p) => rawFeatures(p, asOf));
+  const mu = [0, 1, 2, 3].map((j) => raws.reduce((s, r) => s + r[j]!, 0) / raws.length);
+  const sd = [0, 1, 2, 3].map((j) => {
+    const m = mu[j]!;
+    const d = Math.sqrt(raws.reduce((s, r) => s + (r[j]! - m) ** 2, 0) / raws.length);
+    return d === 0 ? 1 : d;
+  });
+  return { mu, sd };
+}
+
+/** One design row: intercept, the four standardised features, then one dummy per category. */
+function designRow(p: SnapshotProtocol, asOf: string, cats: string[], mu: number[], sd: number[]): number[] {
+  const f = rawFeatures(p, asOf);
+  const row = [1, (f[0] - mu[0]!) / sd[0]!, (f[1] - mu[1]!) / sd[1]!, (f[2] - mu[2]!) / sd[2]!, (f[3] - mu[3]!) / sd[3]!];
+  for (const c of cats) row.push(p.category === c ? 1 : 0);
+  return row;
+}
+
+/** Solve a x = b by Gaussian elimination with partial pivoting. */
+function solveLinear(aIn: number[][], bIn: number[]): number[] {
+  const n = bIn.length;
+  const a = aIn.map((row, i) => [...row, bIn[i]!]);
+  for (let col = 0; col < n; col++) {
+    let piv = col;
+    for (let r = col + 1; r < n; r++) if (Math.abs(a[r]![col]!) > Math.abs(a[piv]![col]!)) piv = r;
+    if (piv !== col) {
+      const t = a[col]!;
+      a[col] = a[piv]!;
+      a[piv] = t;
+    }
+    const d = a[col]![col]!;
+    for (let r = col + 1; r < n; r++) {
+      const f = a[r]![col]! / d;
+      if (f === 0) continue;
+      for (let c = col; c <= n; c++) a[r]![c] = a[r]![c]! - f * a[col]![c]!;
+    }
+  }
+  const x = new Array<number>(n).fill(0);
+  for (let r = n - 1; r >= 0; r--) {
+    let s = a[r]![n]!;
+    for (let c = r + 1; c < n; c++) s -= a[r]![c]! * x[c]!;
+    x[r] = s / a[r]![r]!;
+  }
+  return x;
+}
+
+/** Ridge fit: (X'X + lambda I) beta = X'y, the intercept's diagonal left unpenalised. */
+function ridgeFit(x: number[][], y: number[], lambda: number): number[] {
+  const n = x[0]!.length;
+  const a: number[][] = Array.from({ length: n }, () => new Array<number>(n).fill(0));
+  const b = new Array<number>(n).fill(0);
+  for (let i = 0; i < x.length; i++) {
+    const row = x[i]!;
+    for (let j = 0; j < n; j++) {
+      b[j] = b[j]! + row[j]! * y[i]!;
+      for (let k = j; k < n; k++) a[j]![k] = a[j]![k]! + row[j]! * row[k]!;
+    }
+  }
+  for (let j = 0; j < n; j++) for (let k = 0; k < j; k++) a[j]![k] = a[k]![j]!;
+  for (let j = 1; j < n; j++) a[j]![j] = a[j]![j]! + lambda;
+  return solveLinear(a, b);
+}
+
+/** Ranks with ties averaged, for Spearman's correlation. */
+function ranksOf(values: number[]): number[] {
+  const order = values.map((v, i) => [v, i] as const).sort((a, b) => a[0] - b[0]);
+  const ranks = new Array<number>(values.length);
+  let i = 0;
+  while (i < order.length) {
+    let j = i;
+    while (j + 1 < order.length && order[j + 1]![0] === order[i]![0]) j++;
+    const avg = (i + j) / 2 + 1;
+    for (let k = i; k <= j; k++) ranks[order[k]![1]] = avg;
+    i = j + 1;
+  }
+  return ranks;
+}
+
+/** Spearman's rank correlation between two equal-length series. */
+function spearman(xs: number[], ys: number[]): number {
+  const rx = ranksOf(xs);
+  const ry = ranksOf(ys);
+  const mx = rx.reduce((s, v) => s + v, 0) / rx.length;
+  const my = ry.reduce((s, v) => s + v, 0) / ry.length;
+  let num = 0;
+  let dx = 0;
+  let dy = 0;
+  for (let i = 0; i < xs.length; i++) {
+    num += (rx[i]! - mx) * (ry[i]! - my);
+    dx += (rx[i]! - mx) ** 2;
+    dy += (ry[i]! - my) ** 2;
+  }
+  return dx === 0 || dy === 0 ? 0 : num / Math.sqrt(dx * dy);
+}
+
+/** The q-th quantile of a sorted series, linearly interpolated (the type-7 rule). */
+function quantileOf(sorted: number[], q: number): number {
+  const pos = q * (sorted.length - 1);
+  const lo = Math.floor(pos);
+  const hi = Math.ceil(pos);
+  if (lo === hi) return sorted[lo]!;
+  return sorted[lo]! + (sorted[hi]! - sorted[lo]!) * (pos - lo);
+}
+
+/** Out-of-fold accuracy of one model, in log10 space, as the dashboard states it. */
+export interface CvMetrics {
+  median_abs_log10: number;
+  bias_log10: number;
+  spearman: number;
+  /** 10 to the median absolute error: the typical miss, as a multiple. */
+  typical_factor: number;
+}
+
+function metricsOf(pred: number[], actual: number[]): CvMetrics {
+  const errs = pred.map((v, i) => v - actual[i]!);
+  const med = median(errs.map((e) => Math.abs(e)));
+  return {
+    median_abs_log10: med,
+    bias_log10: errs.reduce((s, e) => s + e, 0) / errs.length,
+    spearman: spearman(pred, actual),
+    typical_factor: 10 ** med,
+  };
+}
+
+/** One category's fitted effect: how the fit reprices it against the average traded protocol. */
+export interface CategoryEffect {
+  category: string;
+  /** Traded protocols of this category in the training set. */
+  peers: number;
+  effect_log10: number;
+  /** 10 to the effect: the multiplier the effect applies, all else equal. */
+  effect_mult: number;
+}
+
+/** Everything the dashboard's Fit & validation panel states, computed at build time. */
+export interface FitReport {
+  training_count: number;
+  /** Protocols carrying a market-cap field at all. */
+  traded_listed: number;
+  /** Of those, the ones carrying a real (positive) cap, before the product screen. */
+  traded_real: number;
+  folds: number;
+  lambda: number;
+  lambda_grid: number[];
+  /** The fitted level for the average traded protocol with no category effect, in log10. */
+  base_log10: number;
+  base_usd: number;
+  /** The TVL slope per log10 unit, and the multiple it gives a tenfold TVL difference. */
+  tvl_slope_per_log10: number;
+  tvl_mult_per_10x: number;
+  /** What moving 7-day growth from 0% to +10% does to the estimate, as a multiple. */
+  growth_mult_0_to_10pct: number;
+  /** What being tracked 5 years rather than 1 does to the estimate, as a multiple. */
+  age_mult_1_to_5yr: number;
+  /** What each doubling of the chain count does to the estimate, as a multiple. */
+  chains_mult_per_doubling: number;
+  category_effects: CategoryEffect[];
+  cv_fitted: CvMetrics;
+  cv_baseline_v2: CvMetrics;
+  resid_q10_log10: number;
+  resid_q90_log10: number;
+}
+
+/** A fitted prediction for one protocol, split into the terms the detail view shows. */
+export interface FittedPrediction {
+  pred_log10: number;
+  base_log10: number;
+  term_tvl: number;
+  term_growth: number;
+  term_age: number;
+  term_chains: number;
+  term_category: number;
+  /** The category's fitted effect, or null when the category has no traded peers in the fit. */
+  category_effect: CategoryEffect | null;
+}
+
+/**
+ * Fit the v3 model on the snapshot: cross-validate the ridge penalty, score the v2 baseline on
+ * the same folds, fit on every training row, and return the report plus the scoring function.
+ */
+export function fitModel(snapshot: Snapshot): { report: FitReport; predict: (p: SnapshotProtocol) => FittedPrediction } {
+  const asOf = snapshot.as_of;
+  const train = trainingSet(snapshot);
+  const cats = [...new Set(train.map((p) => p.category).filter((c): c is string => c !== null))].sort();
+  const y = train.map((p) => Math.log10(p.mcap_usd!));
+  const foldOf = (slug: string) => slugHash(slug) % FIT_FOLDS;
+
+  // Out-of-fold predictions for one penalty: each fold is scored by a fit on the other four,
+  // standardised on those four — the row's own cap is never in its own fit.
+  const oofFor = (lambda: number): number[] => {
+    const pred = new Array<number>(train.length);
+    for (let f = 0; f < FIT_FOLDS; f++) {
+      const fitRows = train.filter((p) => foldOf(p.slug) !== f);
+      const { mu, sd } = featureStats(fitRows, asOf);
+      const beta = ridgeFit(
+        fitRows.map((p) => designRow(p, asOf, cats, mu, sd)),
+        fitRows.map((p) => Math.log10(p.mcap_usd!)),
+        lambda,
+      );
+      train.forEach((p, i) => {
+        if (foldOf(p.slug) !== f) return;
+        const row = designRow(p, asOf, cats, mu, sd);
+        pred[i] = row.reduce((s, v, j) => s + v * beta[j]!, 0);
+      });
+    }
+    return pred;
+  };
+
+  // The penalty is the grid point with the lowest out-of-fold median absolute log10 error.
+  let lambda = LAMBDA_GRID[0]!;
+  let oof = oofFor(lambda);
+  let bestMed = metricsOf(oof, y).median_abs_log10;
+  for (const candidate of LAMBDA_GRID.slice(1)) {
+    const candidateOof = oofFor(candidate);
+    const med = metricsOf(candidateOof, y).median_abs_log10;
+    if (med < bestMed) {
+      bestMed = med;
+      lambda = candidate;
+      oof = candidateOof;
+    }
+  }
+  const cvFitted = metricsOf(oof, y);
+  const residuals = oof.map((v, i) => v - y[i]!).sort((a, b) => a - b);
+  const residQ10 = quantileOf(residuals, 0.1);
+  const residQ90 = quantileOf(residuals, 0.9);
+
+  // The v2 baseline on the same folds: each fold's rows are scored by peer multiples learned
+  // from every protocol outside the fold, exactly the evidence v2 uses in production.
+  const baselinePred = new Array<number>(train.length);
+  for (let f = 0; f < FIT_FOLDS; f++) {
+    const outside: Snapshot = { ...snapshot, protocols: snapshot.protocols.filter((q) => foldOf(q.slug) !== f) };
+    const peers = peerMultiples(outside);
+    train.forEach((p, i) => {
+      if (foldOf(p.slug) !== f) return;
+      baselinePred[i] = Math.log10(Math.max(1, impliedValue(p, asOf, multipleFor(p, peers)).implied));
+    });
+  }
+  const cvBaseline = metricsOf(baselinePred, y);
+
+  // The shipped fit: every training row, at the cross-validated penalty.
+  const { mu, sd } = featureStats(train, asOf);
+  const beta = ridgeFit(
+    train.map((p) => designRow(p, asOf, cats, mu, sd)),
+    y,
+    lambda,
+  );
+  const peerCount = new Map<string, number>();
+  for (const p of train) if (p.category !== null) peerCount.set(p.category, (peerCount.get(p.category) ?? 0) + 1);
+  const effects = new Map<string, CategoryEffect>();
+  cats.forEach((c, i) => {
+    const effect = beta[5 + i]!;
+    effects.set(c, { category: c, peers: peerCount.get(c) ?? 0, effect_log10: effect, effect_mult: 10 ** effect });
+  });
+
+  const report: FitReport = {
+    training_count: train.length,
+    traded_listed: snapshot.protocols.filter((p) => p.mcap_usd !== null).length,
+    traded_real: snapshot.protocols.filter((p) => p.mcap_usd !== null && p.mcap_usd > 0).length,
+    folds: FIT_FOLDS,
+    lambda,
+    lambda_grid: [...LAMBDA_GRID],
+    base_log10: beta[0]!,
+    base_usd: Math.round(10 ** beta[0]!),
+    tvl_slope_per_log10: beta[1]! / sd[0]!,
+    tvl_mult_per_10x: 10 ** (beta[1]! / sd[0]!),
+    growth_mult_0_to_10pct: 10 ** ((beta[2]! / sd[1]!) * Math.asinh(0.5)),
+    age_mult_1_to_5yr: 10 ** ((beta[3]! / sd[2]!) * (Math.log1p(5) - Math.log1p(1))),
+    chains_mult_per_doubling: 10 ** (beta[4]! / sd[3]!),
+    category_effects: [...effects.values()].sort((a, b) => b.effect_log10 - a.effect_log10),
+    cv_fitted: cvFitted,
+    cv_baseline_v2: cvBaseline,
+    resid_q10_log10: residQ10,
+    resid_q90_log10: residQ90,
+  };
+
+  const predict = (p: SnapshotProtocol): FittedPrediction => {
+    const row = designRow(p, asOf, cats, mu, sd);
+    const effect = p.category !== null ? (effects.get(p.category) ?? null) : null;
+    return {
+      pred_log10: row.reduce((s, v, j) => s + v * beta[j]!, 0),
+      base_log10: beta[0]!,
+      term_tvl: row[1]! * beta[1]!,
+      term_growth: row[2]! * beta[2]!,
+      term_age: row[3]! * beta[3]!,
+      term_chains: row[4]! * beta[4]!,
+      term_category: effect === null ? 0 : effect.effect_log10,
+      category_effect: effect,
+    };
+  };
+  return { report, predict };
+}
+
 
 /** Gas and effort character of a chain, for farm plans: cheap L2s and Solana versus Ethereum mainnet. `rank` orders chains by typical cost, cheapest first. */
 const CHAIN_COST: Record<string, { gas: string; note: string; rank: number }> = {
@@ -237,12 +593,6 @@ function sizeTier(tvl: number): string {
   return '$100–$1,000';
 }
 
-/** A small deterministic hash of a slug, so wording variants are stable per protocol. */
-function slugHash(slug: string): number {
-  let h = 0;
-  for (let i = 0; i < slug.length; i++) h = (h * 31 + slug.charCodeAt(i)) >>> 0;
-  return h;
-}
 
 /** Pick one of `variants` for this slug, deterministically — the same protocol always reads the same. */
 function variant<T>(slug: string, variants: readonly T[]): T {
@@ -471,6 +821,7 @@ export function farmSteps(p: SnapshotProtocol, onWatchlist: boolean, asOf: strin
 }
 
 
+
 /** One row of board.json: the ranked board's row. */
 export interface BoardRow {
   rank: number;
@@ -491,14 +842,20 @@ export interface BoardRow {
   category_size: number;
   implied_value_usd: number;
   model: {
-    peer_multiple: number;
-    peer_raw_multiple: number;
-    peer_count: number;
-    peer_source: 'category' | 'global';
-    base_usd: number;
-    growth_multiplier: number;
-    maturity_multiplier: number;
-    reach_multiplier: number;
+    /** The fitted log10 market cap, split into the terms the detail view shows. */
+    pred_log10: number;
+    base_log10: number;
+    term_tvl: number;
+    term_growth: number;
+    term_age: number;
+    term_chains: number;
+    term_category: number;
+    /** Whether the row's category has traded peers in the fit, and how many. */
+    category_in_fit: boolean;
+    category_peers: number;
+    /** The P10–P90 band: the estimate shifted by the out-of-fold residual quantiles. */
+    band_low_usd: number;
+    band_high_usd: number;
   };
   farm_steps: string[];
 }
@@ -530,23 +887,30 @@ export interface RadarRow {
   category_rank: number;
   category_size: number;
   implied_value_usd: number;
-  peer_multiple: number;
-  peer_raw_multiple: number;
-  peer_count: number;
-  peer_source: 'category' | 'global';
-  growth_multiplier: number;
-  maturity_multiplier: number;
-  reach_multiplier: number;
+  band_low_usd: number;
+  band_high_usd: number;
+  pred_log10: number;
+  base_log10: number;
+  term_tvl: number;
+  term_growth: number;
+  term_age: number;
+  term_chains: number;
+  term_category: number;
+  /** The category effect as a multiple, or null when the category is not in the fit. */
+  category_effect_mult: number | null;
+  category_peers: number;
   farm_steps: string[];
 }
 
-/** Everything the dashboard needs: the board, the live set, the peer table and the model. */
+/** Everything the dashboard needs: the board, the live set, the fit report and the baseline's peer table. */
 export interface RadarData {
   as_of: string;
   source: string;
   floor_usd: number;
   model_version: string;
   model: typeof MODEL;
+  fit: FitReport;
+  total_protocols: number;
   watchlist_size: number;
   board_size: number;
   early_size: number;
@@ -578,21 +942,33 @@ export function parseSnapshot(text: string): Snapshot {
 /** Score, select and rank the board, and assemble the dashboard's data. */
 export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: RadarData } {
   const peers = peerMultiples(snapshot);
+  const fitted = fitModel(snapshot);
+  const q10 = fitted.report.resid_q10_log10;
+  const q90 = fitted.report.resid_q90_log10;
   const watch = new Set(snapshot.watchlist);
-  const scored: { p: SnapshotProtocol; stat: PeerStat; v: ReturnType<typeof impliedValue> }[] = [];
+  const scored: {
+    p: SnapshotProtocol;
+    pr: FittedPrediction;
+    implied: number;
+    bandLow: number;
+    bandHigh: number;
+  }[] = [];
   for (const p of snapshot.protocols) {
     if (!isPreToken(p)) continue;
     const onWatchlist = watch.has(p.slug);
     if (!onWatchlist && !isEarlyCandidate(p)) continue;
-    if (!onWatchlist && p.tvl_usd >= snapshot.floor_usd) continue; // above-floor non-watchlist: the house's screen set it aside
-    const stat = multipleFor(p, peers);
-    scored.push({ p, stat, v: impliedValue(p, snapshot.as_of, stat) });
+    const pr = fitted.predict(p);
+    const implied = Math.max(1, Math.round(10 ** pr.pred_log10));
+    // The band is the estimate moved by the out-of-fold residual quantiles, kept enclosing it.
+    const bandLow = Math.max(1, Math.min(implied, Math.round(10 ** (pr.pred_log10 + q10))));
+    const bandHigh = Math.max(implied, Math.round(10 ** (pr.pred_log10 + q90)));
+    scored.push({ p, pr, implied, bandLow, bandHigh });
   }
-  scored.sort((a, b) => b.v.implied - a.v.implied || b.p.tvl_usd - a.p.tvl_usd || (a.p.slug < b.p.slug ? -1 : 1));
+  scored.sort((a, b) => b.implied - a.implied || b.p.tvl_usd - a.p.tvl_usd || (a.p.slug < b.p.slug ? -1 : 1));
   const watchlistRows = scored.filter((s) => watch.has(s.p.slug));
   const earlyRows = scored.filter((s) => !watch.has(s.p.slug));
   const picked = [...watchlistRows, ...earlyRows.slice(0, Math.max(0, BOARD_ROWS - watchlistRows.length))];
-  picked.sort((a, b) => b.v.implied - a.v.implied || b.p.tvl_usd - a.p.tvl_usd || (a.p.slug < b.p.slug ? -1 : 1));
+  picked.sort((a, b) => b.implied - a.implied || b.p.tvl_usd - a.p.tvl_usd || (a.p.slug < b.p.slug ? -1 : 1));
 
   // Standing within the category: the board is already in implied-value order, so a running
   // counter per category gives each row its category rank and the category's board size.
@@ -618,19 +994,22 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
     symbol: s.p.symbol,
     token_status: 'pre-token',
     watchlist: watch.has(s.p.slug),
-    age_days: s.v.age,
+    age_days: ageDays(snapshot.as_of, s.p.listed_at),
     category_rank: catRank[i]!,
     category_size: catSeen.get(s.p.category ?? '(none)') ?? 0,
-    implied_value_usd: s.v.implied,
+    implied_value_usd: s.implied,
     model: {
-      peer_multiple: s.stat.multiple,
-      peer_raw_multiple: s.stat.raw_multiple,
-      peer_count: s.stat.peers,
-      peer_source: s.stat.source,
-      base_usd: Math.round(s.v.base),
-      growth_multiplier: s.v.growthMult,
-      maturity_multiplier: s.v.maturityMult,
-      reach_multiplier: s.v.reachMult,
+      pred_log10: s.pr.pred_log10,
+      base_log10: s.pr.base_log10,
+      term_tvl: s.pr.term_tvl,
+      term_growth: s.pr.term_growth,
+      term_age: s.pr.term_age,
+      term_chains: s.pr.term_chains,
+      term_category: s.pr.term_category,
+      category_in_fit: s.pr.category_effect !== null,
+      category_peers: s.pr.category_effect?.peers ?? 0,
+      band_low_usd: s.bandLow,
+      band_high_usd: s.bandHigh,
     },
     farm_steps: farmSteps(s.p, watch.has(s.p.slug), snapshot.as_of),
   }));
@@ -657,6 +1036,8 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
     floor_usd: snapshot.floor_usd,
     model_version: MODEL_VERSION,
     model: MODEL,
+    fit: fitted.report,
+    total_protocols: snapshot.protocols.length,
     watchlist_size: snapshot.watchlist.length,
     board_size: board.length,
     early_size: board.filter((r) => !r.watchlist).length,
@@ -680,13 +1061,17 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
       category_rank: r.category_rank,
       category_size: r.category_size,
       implied_value_usd: r.implied_value_usd,
-      peer_multiple: r.model.peer_multiple,
-      peer_raw_multiple: r.model.peer_raw_multiple,
-      peer_count: r.model.peer_count,
-      peer_source: r.model.peer_source,
-      growth_multiplier: r.model.growth_multiplier,
-      maturity_multiplier: r.model.maturity_multiplier,
-      reach_multiplier: r.model.reach_multiplier,
+      band_low_usd: r.model.band_low_usd,
+      band_high_usd: r.model.band_high_usd,
+      pred_log10: r.model.pred_log10,
+      base_log10: r.model.base_log10,
+      term_tvl: r.model.term_tvl,
+      term_growth: r.model.term_growth,
+      term_age: r.model.term_age,
+      term_chains: r.model.term_chains,
+      term_category: r.model.term_category,
+      category_effect_mult: r.model.category_in_fit ? 10 ** r.model.term_category : null,
+      category_peers: r.model.category_peers,
       farm_steps: r.farm_steps,
     })),
     live,
